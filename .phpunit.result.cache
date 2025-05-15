@@ -1,0 +1,1 @@
+{"version":1,"defects":{"ApiTest::testGetRandomVideos":8,"ApiTest::testGetRandomVideosWithGenre":8,"ApiTest::testGetMasterlists":8,"ApiTest::testPostStatsView":8,"ApiTest::testPostStatsClick":8,"ApiTest::testGetRandomVideosInvalidLimit":8,"ApiTest::testPostStatsViewMissingId":8},"times":{"SmokeTest::testTrue":0}}

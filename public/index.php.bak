@@ -1,0 +1,243 @@
+<?php file_put_contents("debug_access.log", "Accessed at: " . date("Y-m-d H:i:s") . " - REQUEST_URI: " . (["REQUEST_URI"] ?? "N/A") . " - SCRIPT_FILENAME: " . (["SCRIPT_FILENAME"] ?? "N/A") . "\n", FILE_APPEND); ?>
+<?php
+use Psr\Http\Message\ResponseInterface as Response;
+use Psr\Http\Message\ServerRequestInterface as Request;
+use Slim\Factory\AppFactory;
+use DI\Container;
+use Dotenv\Dotenv;
+use Ramsey\Uuid\Uuid;
+
+require __DIR__ . '/../vendor/autoload.php';
+    // Create PHP-DI container
+    $container = new Container();
+    AppFactory::setContainer($container);
+
+    // Create app
+    $app = AppFactory::create();
+
+    // Load .env file
+    $dotenv = Dotenv::createImmutable(__DIR__ . '/../');
+    $dotenv->load();
+
+    // Add error middleware (set to false for production, true for development)
+    $displayErrorDetails = strtolower($_ENV["APP_ENV"] ?? "production") === "development";
+    $app->addErrorMiddleware($displayErrorDetails, true, true);
+
+    // Database connection function (could be a service in a real app)
+    function getPDO(): PDO
+    {
+        $dbHost = $_ENV["DB_HOST"] ?? "localhost";
+        $dbName = $_ENV["DB_NAME"] ?? "yukiya1013_tiktokfanza";
+        $dbUser = $_ENV["DB_USER"];
+        $dbPass = $_ENV["DB_PASS"];
+        $dsn = "mysql:host={$dbHost};dbname={$dbName};charset=utf8mb4";
+
+        try {
+            $pdo = new PDO($dsn, $dbUser, $dbPass);
+            $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+            $pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
+            return $pdo;
+        } catch (PDOException $e) {
+            // In a real app, log this error and throw a more generic exception
+            error_log("DB Connection Error: " . $e->getMessage());
+            throw new RuntimeException("Database connection failed.");
+        }
+    }
+
+    // CORS Middleware (Allow all for now, restrict in production)
+    $app->add(function (Request $request, $handler) {
+        $response = $handler->handle($request);
+        return $response
+            ->withHeader("Access-Control-Allow-Origin", "*")
+            ->withHeader("Access-Control-Allow-Headers", "X-Requested-With, Content-Type, Accept, Origin, Authorization")
+            ->withHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS");
+    });
+
+    // Security Headers
+    $app->add(function (Request $request, $handler) {
+        $response = $handler->handle($request);
+        return $response
+            ->withHeader("X-Frame-Options", "DENY")
+            ->withHeader("X-Content-Type-Options", "nosniff");
+            // Add other security headers like CSP if needed
+    });
+
+    // --- API Routes ---
+
+    // GET /api/videos/random
+    $app->get("/api/videos/random", function (Request $request, Response $response) {
+        $params = $request->getQueryParams();
+        $limit = isset($params["limit"]) ? (int)$params["limit"] : 3;
+        $genre = $params["genre"] ?? null;
+        $tag = $params["tag"] ?? null;
+        $actress = $params["actress"] ?? null;
+        $offsetSec = (int)($_ENV["VIDEO_OFFSET_SEC"] ?? 10);
+
+        $sql = "SELECT id, genre, tags, actress, purchase_url, 
+                       CONCAT(\"/videos/\", id, \".mp4\") as src, 
+                       CONCAT(\"/videos/\", id, \".jpg\") as poster 
+                FROM video_meta WHERE is_active = 1";
+        $queryParams = [];
+
+        if ($genre) {
+            $sql .= " AND JSON_CONTAINS(genre, :genre)";
+            $queryParams[":genre"] = json_encode($genre); // Assuming genre is passed as a single string, adjust if it's an array
+        }
+        if ($tag) {
+            $sql .= " AND JSON_CONTAINS(tags, :tag)";
+            $queryParams[":tag"] = json_encode($tag); // Assuming tag is passed as a single string
+        }
+        if ($actress) {
+            $sql .= " AND actress = :actress";
+            $queryParams[":actress"] = $actress;
+        }
+
+        $sql .= " ORDER BY RAND() LIMIT :limit"; // RAND() can be slow on large tables
+        $queryParams[":limit"] = $limit;
+
+        try {
+            $pdo = getPDO();
+            $stmt = $pdo->prepare($sql);
+            foreach ($queryParams as $key => $value) {
+                if ($key === ":limit") {
+                    $stmt->bindValue($key, $value, PDO::PARAM_INT);
+                } else {
+                    $stmt->bindValue($key, $value);
+                }
+            }
+            $stmt->execute();
+            $videos = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            
+            // Process to ensure JSON fields are decoded for the response
+            foreach ($videos as &$video) {
+                if (isset($video["genre"])) {
+                    $video["genre"] = json_decode($video["genre"]);
+                }
+                if (isset($video["tags"])) {
+                    $video["tags"] = json_decode($video["tags"]);
+                }
+                $video["offset_sec"] = $offsetSec; // Add offset to each video object
+            }
+
+            $response->getBody()->write(json_encode($videos));
+            return $response->withHeader("Content-Type", "application/json");
+        } catch (PDOException $e) {
+            error_log("API Error (/api/videos/random): " . $e->getMessage());
+            $response->getBody()->write(json_encode(["error" => "Failed to fetch videos", "details" => $e->getMessage()]));
+            return $response->withStatus(500)->withHeader("Content-Type", "application/json");
+        }
+    });
+
+    // GET /api/masterlists
+    $app->get("/api/masterlists", function (Request $request, Response $response) {
+        try {
+            $pdo = getPDO();
+            $genres = [];
+            $tags = [];
+            $actresses = [];
+
+            // Fetch all unique genres
+            $stmtGenres = $pdo->query("SELECT DISTINCT JSON_UNQUOTE(JSON_EXTRACT(genre, '$[*]')) FROM video_meta WHERE JSON_TYPE(genre) = 'ARRAY' AND JSON_LENGTH(genre) > 0");
+            $rawGenres = $stmtGenres->fetchAll(PDO::FETCH_COLUMN);
+            foreach ($rawGenres as $genreString) { // Changed variable name for clarity
+                if ($genreString) {
+                    $decoded = json_decode($genreString);
+                    if (is_array($decoded)) {
+                        $genres = array_merge($genres, $decoded);
+                    }
+                }
+            }
+            $genres = array_values(array_unique($genres));
+
+            // Fetch all unique tags
+            $stmtTags = $pdo->query("SELECT DISTINCT JSON_UNQUOTE(JSON_EXTRACT(tags, '$[*]')) FROM video_meta WHERE JSON_TYPE(tags) = 'ARRAY' AND JSON_LENGTH(tags) > 0");
+            $rawTags = $stmtTags->fetchAll(PDO::FETCH_COLUMN);
+            foreach ($rawTags as $tagString) { // Changed variable name for clarity
+                if ($tagString) {
+                    $decoded = json_decode($tagString);
+                    if (is_array($decoded)) {
+                        $tags = array_merge($tags, $decoded);
+                    }
+                }
+            }
+            $tags = array_values(array_unique($tags));
+
+            // Fetch all unique actresses
+            $stmtActresses = $pdo->query("SELECT DISTINCT actress FROM video_meta WHERE actress IS NOT NULL AND actress != '' ORDER BY actress ASC");
+            $actresses = $stmtActresses->fetchAll(PDO::FETCH_COLUMN);
+
+            $masterlists = [
+                "genres" => $genres,
+                "tags" => $tags,
+                "actresses" => $actresses,
+            ];
+
+            $response->getBody()->write(json_encode($masterlists));
+            return $response->withHeader("Content-Type", "application/json");
+        } catch (PDOException $e) {
+            error_log("API Error (/api/masterlists): " . $e->getMessage());
+            $response->getBody()->write(json_encode(["error" => "Failed to fetch masterlists", "details" => $e->getMessage()]));
+            return $response->withStatus(500)->withHeader("Content-Type", "application/json");
+        }
+    });
+
+    // POST /api/stats/view
+    $app->post("/api/stats/view", function (Request $request, Response $response) {
+        $data = $request->getParsedBody();
+        $videoId = $data["id"] ?? null;
+
+        if (!$videoId) {
+            $response->getBody()->write(json_encode(["error" => "Video ID is required"]));
+            return $response->withStatus(400)->withHeader("Content-Type", "application/json");
+        }
+
+        try {
+            $pdo = getPDO();
+            $sql = "INSERT INTO view_stats (video_id) VALUES (:video_id)";
+            $stmt = $pdo->prepare($sql);
+            $stmt->bindParam(":video_id", $videoId);
+            $stmt->execute();
+
+            $response->getBody()->write(json_encode(["ok" => true, "message" => "View stat recorded for " . $videoId]));
+            return $response->withHeader("Content-Type", "application/json");
+        } catch (PDOException $e) {
+            error_log("API Error (/api/stats/view): " . $e->getMessage());
+            $response->getBody()->write(json_encode(["error" => "Failed to record view stat", "details" => $e->getMessage()]));
+            return $response->withStatus(500)->withHeader("Content-Type", "application/json");
+        }
+    });
+
+    // POST /api/stats/click
+    $app->post("/api/stats/click", function (Request $request, Response $response) {
+        $data = $request->getParsedBody();
+        $videoId = $data["id"] ?? null;
+
+        if (!$videoId) {
+            $response->getBody()->write(json_encode(["error" => "Video ID is required"]));
+            return $response->withStatus(400)->withHeader("Content-Type", "application/json");
+        }
+
+        try {
+            $pdo = getPDO();
+            $sql = "INSERT INTO click_stats (video_id) VALUES (:video_id)";
+            $stmt = $pdo->prepare($sql);
+            $stmt->bindParam(":video_id", $videoId);
+            $stmt->execute();
+
+            $response->getBody()->write(json_encode(["ok" => true, "message" => "Click stat recorded for " . $videoId]));
+            return $response->withHeader("Content-Type", "application/json");
+        } catch (PDOException $e) {
+            error_log("API Error (/api/stats/click): " . $e->getMessage());
+            $response->getBody()->write(json_encode(["error" => "Failed to record click stat", "details" => $e->getMessage()]));
+            return $response->withStatus(500)->withHeader("Content-Type", "application/json");
+        }
+    });
+
+    // OPTIONS route for CORS preflight requests
+    $app->options("/{routes:.+}", function ($request, $response, $args) {
+        return $response;
+    });
+
+    $app->run();
+
+?>

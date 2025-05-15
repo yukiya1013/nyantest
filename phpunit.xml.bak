@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit bootstrap="vendor/autoload.php"
+         colors="true"
+         verbose="true"
+         stopOnFailure="false">
+    <testsuites>
+        <testsuite name="App Tests">
+            <directory>tests</directory>
+        </testsuite>
+    </testsuites>
+    <php>
+        <env name="DB_DSN" value="mysql:host=localhost;dbname=yukiya1013_tiktokfanza;charset=utf8mb4"/>
+        <env name="DB_USER" value="yukiya1013_user"/>
+        <env name="DB_PASS" value="123newny"/>
+        <env name="AFFILIATE_ID" value="AVcollecter-005"/>
+        <env name="VIDEO_OFFSET_SEC" value="10"/>
+        <env name="APP_ENV" value="testing"/>
+    </php>
+</phpunit>
